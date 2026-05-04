@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.31.12
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.88.3
 	github.com/exergy-dev/go-cql2 v0.0.0-20260504204024-796456d5f243
+	github.com/exergy-dev/go-topology-suite v0.0.0-20260504233215-8a2d1937f31b
 	github.com/gdamore/tcell/v2 v2.8.1
 	github.com/rivo/tview v0.42.0
 	github.com/stretchr/testify v1.11.1

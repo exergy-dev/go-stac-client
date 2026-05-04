@@ -85,6 +85,15 @@ First stable release. STAC API 1.0.0 client targeting Go 1.23+.
   (`["integer", "null"]`) used by Microsoft Planetary Computer for
   nullable fields. Previous releases failed to decode such queryables.
 
+### Geometry
+
+- TUI's `cmd/tui/formatting/geometry.go` no longer walks GeoJSON via
+  `map[string]any`. Parsing and type identification are delegated to
+  [github.com/exergy-dev/go-topology-suite](https://github.com/exergy-dev/go-topology-suite)'s
+  `geojson` and `geom` packages, so the TUI shares the same OGC-compliant
+  parser as the rest of the geospatial stack and gets correct envelopes,
+  ring/hole accounting, and GeometryCollection support for free.
+
 ### Live integration
 
 - `pkg/client/live_test.go` (build tag `live`) covers Element84 Earth

@@ -38,6 +38,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/exergy-dev/go-cql2 v0.0.0-20260504204024-796456d5f243 h1:g0p6Jpf+TJAoz4o0NKPLAE0KuvRTyE3foSusbxoRfl4=
 github.com/exergy-dev/go-cql2 v0.0.0-20260504204024-796456d5f243/go.mod h1:yi9GdixFZp5aWb7FI1QecF0PF+OCmWpIQn2tSTuWNWQ=
+github.com/exergy-dev/go-topology-suite v0.0.0-20260504233215-8a2d1937f31b h1:WjpEL37Q5LySlchqxbhoa6aQ9+XsM34OfWrpDLN3dyg=
+github.com/exergy-dev/go-topology-suite v0.0.0-20260504233215-8a2d1937f31b/go.mod h1:lLDAmaBcr7m5S0rVgGchtWNW1kwcqUrZ0BILlQHrpIE=
 github.com/gdamore/encoding v1.0.1 h1:YzKZckdBL6jVt2Gc+5p82qhrGiqMdG/eNs6Wy0u3Uhw=
 github.com/gdamore/encoding v1.0.1/go.mod h1:0Z0cMFinngz9kS1QfMjCP8TY7em3bZYeeklsSDPivEo=
 github.com/gdamore/tcell/v2 v2.8.1 h1:KPNxyqclpWpWQlPLx6Xui1pMk8S+7+R37h3g07997NU=
