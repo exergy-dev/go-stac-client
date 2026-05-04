@@ -5,63 +5,78 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"net/http"
 	"net/url"
 
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 )
 
 // GetItem fetches an individual item from a collection.
+//
+// Returns a *HTTPError satisfying errors.Is(err, ErrNotFound) when the item
+// does not exist.
 func (c *Client) GetItem(ctx context.Context, collectionID, itemID string) (*stac.Item, error) {
 	if collectionID == "" {
-		return nil, fmt.Errorf("collection ID cannot be empty")
+		return nil, fmt.Errorf("stac: collection ID cannot be empty")
 	}
 	if itemID == "" {
-		return nil, fmt.Errorf("item ID cannot be empty")
+		return nil, fmt.Errorf("stac: item ID cannot be empty")
 	}
 
-	u := c.baseURL.JoinPath("collections", collectionID, "items", itemID)
+	path := fmt.Sprintf("collections/%s/items/%s",
+		url.PathEscape(collectionID), url.PathEscape(itemID))
+	return doJSON[stac.Item](ctx, c, Get(path))
+}
 
-	resp, err := c.doRequest(ctx, http.MethodGet, u.String(), nil)
+// GetItems returns an iterator over all items in a collection.
+func (c *Client) GetItems(ctx context.Context, collectionID string) iter.Seq2[*stac.Item, error] {
+	if collectionID == "" {
+		return errorIter[stac.Item](fmt.Errorf("stac: collection ID cannot be empty"))
+	}
+	path := fmt.Sprintf("collections/%s/items", url.PathEscape(collectionID))
+	return Iterate(ctx, c, Get(path), ItemDecoder())
+}
+
+// GetItemsPages returns an iterator over pages of items in a collection.
+func (c *Client) GetItemsPages(ctx context.Context, collectionID string) iter.Seq2[*PageResult[stac.Item], error] {
+	if collectionID == "" {
+		return errorIterPage[stac.Item](fmt.Errorf("stac: collection ID cannot be empty"))
+	}
+	path := fmt.Sprintf("collections/%s/items", url.PathEscape(collectionID))
+	return IteratePages(ctx, c, Get(path), ItemDecoder())
+}
+
+// doJSON dispatches a request, validates the response, applies the body
+// limit, and decodes JSON into *T.
+func doJSON[T any](ctx context.Context, c *Client, req *Request) (*T, error) {
+	resp, err := c.Do(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var item stac.Item
-		if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
-			return nil, fmt.Errorf("error decoding response from %s: %w", u, err)
-		}
-		return &item, nil
-	case http.StatusNotFound:
-		return nil, fmt.Errorf("item not found: %s", itemID)
-	default:
-		return nil, fmt.Errorf("unexpected status code %d for %s", resp.StatusCode, u)
+	if err := checkStatus(resp); err != nil {
+		return nil, err
 	}
-}
-
-func (c *Client) GetItems(ctx context.Context, collectionID string) iter.Seq2[*stac.Item, error] {
-	return c.GetItemsWithDecoder(ctx, collectionID, DefaultItemDecoder())
-}
-
-// GetItemsWithDecoder fetches items from a collection using a custom page decoder.
-// This is useful for APIs that return non-standard response formats.
-func (c *Client) GetItemsWithDecoder(ctx context.Context, collectionID string, decoder PageDecoder[stac.Item]) iter.Seq2[*stac.Item, error] {
-	if collectionID == "" {
-		return func(y func(*stac.Item, error) bool) {
-			y(nil, fmt.Errorf("collection ID cannot be empty"))
-		}
+	if err := checkJSONContentType(resp); err != nil {
+		return nil, err
 	}
-
-	start := fmt.Sprintf("collections/%s/items", url.PathEscape(collectionID))
-
-	return iteratePagesWithDecoder[stac.Item](ctx, c, start, decoder)
+	var out T
+	dec := json.NewDecoder(limitBody(resp, c.maxBodyBytes))
+	if err := dec.Decode(&out); err != nil {
+		var lerr *limitedReadError
+		if isLimitErr(err, &lerr) {
+			return nil, ErrResponseTooLarge
+		}
+		return nil, fmt.Errorf("stac: decode error: %w", err)
+	}
+	return &out, nil
 }
 
-// GetItemsFromPath fetches items from an arbitrary path using a custom page decoder.
-// This is useful for APIs with non-standard endpoint paths (e.g., ICEYE's /catalog/v2/items).
-func (c *Client) GetItemsFromPath(ctx context.Context, path string, decoder PageDecoder[stac.Item]) iter.Seq2[*stac.Item, error] {
-	return iteratePagesWithDecoder[stac.Item](ctx, c, path, decoder)
+// errorIter returns an iterator that yields a single error.
+func errorIter[V any](err error) iter.Seq2[*V, error] {
+	return func(yield func(*V, error) bool) { yield(nil, err) }
+}
+
+// errorIterPage returns an iterator that yields a single error for page iteration.
+func errorIterPage[V any](err error) iter.Seq2[*PageResult[V], error] {
+	return func(yield func(*PageResult[V], error) bool) { yield(nil, err) }
 }

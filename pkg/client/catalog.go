@@ -2,49 +2,63 @@ package client
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
+	"errors"
 
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 )
 
 // GetCatalog fetches the root catalog document from the STAC API.
-// This is typically the entry point for exploring a STAC API, containing
-// links to collections, search endpoints, and conformance information.
+//
+// The root catalog is typically the entry point for exploring a STAC API,
+// containing links to collections, the search endpoint, and the conformance
+// classes the API implements.
 func (c *Client) GetCatalog(ctx context.Context) (*stac.Catalog, error) {
-	resp, err := c.doRequest(ctx, http.MethodGet, c.baseURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code %d for %s", resp.StatusCode, c.baseURL)
-	}
-
-	var cat stac.Catalog
-	err = json.NewDecoder(resp.Body).Decode(&cat)
-	return &cat, err
+	return doJSON[stac.Catalog](ctx, c, Get(""))
 }
 
 // GetConformance fetches the conformance classes supported by the STAC API.
-// This is a convenience method that fetches the catalog and returns the conformsTo field.
-// For more detailed conformance information, use GetCatalog directly.
+//
+// It first checks the root catalog's conformsTo field. If that field is empty
+// (or absent — common for OGC API Features–only servers), it falls back to
+// fetching the dedicated /conformance endpoint. A *HTTPError satisfying
+// errors.Is(err, ErrNotFound) is returned only when neither source provides
+// conformance information.
 func (c *Client) GetConformance(ctx context.Context) ([]string, error) {
 	cat, err := c.GetCatalog(ctx)
-	if err != nil {
-		return nil, err
+	if err == nil && len(cat.ConformsTo) > 0 {
+		return cat.ConformsTo, nil
 	}
-	return cat.ConformsTo, nil
+
+	type conformanceDoc struct {
+		ConformsTo []string `json:"conformsTo"`
+	}
+	doc, ferr := doJSON[conformanceDoc](ctx, c, Get("conformance"))
+	if ferr == nil && len(doc.ConformsTo) > 0 {
+		return doc.ConformsTo, nil
+	}
+	if err == nil {
+		// Root succeeded but had no conformsTo; surface the fallback error.
+		if ferr != nil {
+			return nil, ferr
+		}
+		return nil, errors.New("stac: server exposes neither root.conformsTo nor /conformance")
+	}
+	return nil, err
 }
 
-// SupportsConformance checks if the STAC API supports a specific conformance class.
-// Use the stac.Conformance* constants for common conformance classes.
+// SupportsConformance reports whether the STAC API declares the given
+// conformance class.
+//
+// Use the stac.Conformance* constants for common conformance class URIs.
 func (c *Client) SupportsConformance(ctx context.Context, conformanceClass string) (bool, error) {
-	cat, err := c.GetCatalog(ctx)
+	classes, err := c.GetConformance(ctx)
 	if err != nil {
 		return false, err
 	}
-	return cat.HasConformance(conformanceClass), nil
+	for _, c := range classes {
+		if c == conformanceClass {
+			return true, nil
+		}
+	}
+	return false, nil
 }

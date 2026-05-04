@@ -35,7 +35,7 @@ func TestClient_SearchSimple(t *testing.T) {
 		case "", "1":
 			assert.Equal(t, "sentinel-2", r.URL.Query().Get("collections"))
 			assert.Equal(t, "1,2,3,4,5,6", r.URL.Query().Get("bbox"))
-			assert.Equal(t, "acquired:desc", r.URL.Query().Get("sortby"))
+			assert.Equal(t, "-acquired", r.URL.Query().Get("sortby"))
 			require.NotEmpty(t, r.URL.Query().Get("query"))
 			require.NotEmpty(t, r.URL.Query().Get("fields"))
 
@@ -66,7 +66,7 @@ func TestClient_SearchSimple(t *testing.T) {
 		Bbox:        []float64{1, 2, 3, 4, 5, 6},
 		Datetime:    "2020-01-01/2020-01-02",
 		Limit:       100,
-		SortBy:      []SortField{{Field: "acquired", Direction: "DESC"}},
+		SortBy:      []SortField{{Field: "acquired", Direction: SortDesc}},
 		Query: map[string]any{
 			"eo:cloud_cover": map[string]any{"lt": 10},
 		},
@@ -121,7 +121,7 @@ func TestClient_SearchCQL2(t *testing.T) {
 	cli, err := NewClient(server.URL, WithTimeout(30*time.Second))
 	require.NoError(t, err)
 
-	seq := cli.SearchCQL2(context.Background(), SearchParams{Collections: []string{"SENTINEL-1"}})
+	seq := cli.Search(context.Background(), SearchParams{Collections: []string{"SENTINEL-1"}})
 	items, err := collect(seq)
 	require.NoError(t, err)
 	require.Len(t, items, 2)
@@ -134,14 +134,14 @@ func TestClient_SearchCQL2_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(Error{Code: 400, Description: "bad request", Type: "InvalidQuery"})
+		json.NewEncoder(w).Encode(APIError{Code: 400, Description: "bad request", Type: "InvalidQuery"})
 	}))
 	defer server.Close()
 
 	cli, err := NewClient(server.URL)
 	require.NoError(t, err)
 
-	seq := cli.SearchCQL2(context.Background(), SearchParams{Collections: []string{"SENTINEL-2"}})
+	seq := cli.Search(context.Background(), SearchParams{Collections: []string{"SENTINEL-2"}})
 	items, err := collect(seq)
 	require.Error(t, err)
 	assert.Nil(t, items)

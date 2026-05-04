@@ -9,7 +9,10 @@ import (
 const CollectionType = "Collection"
 
 // Collection represents a STAC Collection with support for foreign members.
-// The Type field is implicit and always "Collection" per the STAC specification.
+//
+// The Type field is implicit and always "Collection" per the STAC specification;
+// the marshaller sets it unconditionally and the unmarshaller validates it
+// when present.
 type Collection struct {
 	Version     string            `json:"stac_version"`
 	Extensions  []string          `json:"stac_extensions,omitempty"`
@@ -49,7 +52,6 @@ func (col *Collection) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	// Validate type field if present
 	if typeVal, ok := raw["type"]; ok {
 		var t string
 		if err := json.Unmarshal(typeVal, &t); err == nil && t != "" && t != CollectionType {
@@ -72,7 +74,9 @@ func (col *Collection) UnmarshalJSON(data []byte) error {
 }
 
 // MarshalJSON implements custom marshaling to include foreign members.
-// The type field is always set to "Collection" per the STAC specification.
+//
+// The canonical "type" field is always written last so that
+// AdditionalFields cannot override it.
 func (col Collection) MarshalJSON() ([]byte, error) {
 	type collectionAlias Collection
 	aux := collectionAlias(col)
@@ -87,12 +91,10 @@ func (col Collection) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 
-	// Always include type field
-	typeJSON, _ := json.Marshal(CollectionType)
-	obj["type"] = typeJSON
-
-	// Add foreign members
 	for key, val := range col.AdditionalFields {
+		if knownCollectionFields[key] {
+			continue
+		}
 		encoded, err := json.Marshal(val)
 		if err != nil {
 			return nil, err
@@ -100,26 +102,18 @@ func (col Collection) MarshalJSON() ([]byte, error) {
 		obj[key] = encoded
 	}
 
+	typeJSON, _ := json.Marshal(CollectionType)
+	obj["type"] = typeJSON
+
 	return json.Marshal(obj)
 }
 
 // GetLink returns the first link with the specified rel type, or nil if not found.
 func (col *Collection) GetLink(rel string) *Link {
-	for _, link := range col.Links {
-		if link.Rel == rel {
-			return link
-		}
-	}
-	return nil
+	return firstLinkByRel(col.Links, rel)
 }
 
 // GetLinks returns all links with the specified rel type.
 func (col *Collection) GetLinks(rel string) []*Link {
-	var result []*Link
-	for _, link := range col.Links {
-		if link.Rel == rel {
-			result = append(result, link)
-		}
-	}
-	return result
+	return linksByRel(col.Links, rel)
 }

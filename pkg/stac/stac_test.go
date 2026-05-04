@@ -8,6 +8,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestJSONSchemaType_AcceptsStringAndArray(t *testing.T) {
+	t.Run("string form", func(t *testing.T) {
+		var qf QueryableField
+		err := json.Unmarshal([]byte(`{"type":"integer"}`), &qf)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"integer"}, []string(qf.Type))
+		assert.Equal(t, "integer", qf.Type.First())
+	})
+	t.Run("array form (PC nullable)", func(t *testing.T) {
+		var qf QueryableField
+		err := json.Unmarshal([]byte(`{"type":["integer","null"]}`), &qf)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"integer", "null"}, []string(qf.Type))
+		assert.Equal(t, "integer", qf.Type.First())
+		assert.Equal(t, "integer|null", qf.Type.String())
+	})
+	t.Run("marshal canonicalizes", func(t *testing.T) {
+		single := JSONSchemaType{"integer"}
+		b, err := json.Marshal(single)
+		require.NoError(t, err)
+		assert.Equal(t, `"integer"`, string(b))
+
+		multi := JSONSchemaType{"integer", "null"}
+		b, err = json.Marshal(multi)
+		require.NoError(t, err)
+		assert.Equal(t, `["integer","null"]`, string(b))
+	})
+}
+
 func TestItemForeignMembers(t *testing.T) {
 	t.Run("unmarshal preserves foreign members", func(t *testing.T) {
 		jsonData := `{
@@ -38,7 +67,7 @@ func TestItemForeignMembers(t *testing.T) {
 		item := Item{
 			Version:    "1.0.0",
 			ID:         "test-item",
-			Geometry:   map[string]any{"type": "Point", "coordinates": []float64{0, 0}},
+			Geometry:   json.RawMessage(`{"type":"Point","coordinates":[0,0]}`),
 			Properties: map[string]any{"datetime": "2023-01-01T00:00:00Z"},
 			Links:      []*Link{},
 			Assets:     map[string]*Asset{},

@@ -1,37 +1,112 @@
 package stac
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // Queryables represents the queryable properties for a STAC API collection.
 // This follows the OGC API - Features - Part 3: Filtering specification.
 type Queryables struct {
-	Schema      string                      `json:"$schema,omitempty"`
-	ID          string                      `json:"$id,omitempty"`
-	Type        string                      `json:"type,omitempty"`
-	Title       string                      `json:"title,omitempty"`
-	Description string                      `json:"description,omitempty"`
+	Schema      string                     `json:"$schema,omitempty"`
+	ID          string                     `json:"$id,omitempty"`
+	Type        string                     `json:"type,omitempty"`
+	Title       string                     `json:"title,omitempty"`
+	Description string                     `json:"description,omitempty"`
 	Properties  map[string]*QueryableField `json:"properties,omitempty"`
 
 	// AdditionalFields holds foreign members not defined in the spec.
 	AdditionalFields map[string]any `json:"-"`
 }
 
-// QueryableField represents a single queryable property with its JSON Schema definition.
+// JSONSchemaType represents JSON Schema's "type" keyword, which is either a
+// string ("integer") or an array of strings (["integer", "null"]). Both forms
+// are valid and both appear in the wild (e.g., Microsoft Planetary Computer
+// uses arrays for nullable types).
+type JSONSchemaType []string
+
+// UnmarshalJSON accepts either a JSON string or an array of strings.
+func (t *JSONSchemaType) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*t = nil
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*t = []string{s}
+		return nil
+	}
+	if data[0] == '[' {
+		var s []string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*t = s
+		return nil
+	}
+	return fmt.Errorf("queryables: type must be string or []string, got %s", string(data))
+}
+
+// MarshalJSON emits the canonical JSON Schema form: a bare string for a
+// single type, an array otherwise.
+func (t JSONSchemaType) MarshalJSON() ([]byte, error) {
+	switch len(t) {
+	case 0:
+		return []byte("null"), nil
+	case 1:
+		return json.Marshal(t[0])
+	default:
+		return json.Marshal([]string(t))
+	}
+}
+
+// String returns the type for the common single-value case, or a
+// pipe-joined string ("integer|null") for multi-valued types.
+func (t JSONSchemaType) String() string {
+	switch len(t) {
+	case 0:
+		return ""
+	case 1:
+		return t[0]
+	default:
+		return strings.Join(t, "|")
+	}
+}
+
+// First returns the first type in the list, or "" if empty.
+func (t JSONSchemaType) First() string {
+	if len(t) == 0 {
+		return ""
+	}
+	return t[0]
+}
+
+// QueryableField represents a single queryable property with its JSON Schema
+// definition.
+//
+// Type accepts JSON Schema's two valid forms — bare string ("integer") or an
+// array of strings (["integer", "null"]).
 type QueryableField struct {
-	Title       string   `json:"title,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Type        string   `json:"type,omitempty"`        // "string", "number", "integer", "boolean", "array", "object"
-	Format      string   `json:"format,omitempty"`      // e.g., "date-time", "uri"
-	Enum        []any    `json:"enum,omitempty"`        // Allowed values
-	Minimum     *float64 `json:"minimum,omitempty"`     // For numeric types
-	Maximum     *float64 `json:"maximum,omitempty"`     // For numeric types
-	MinItems    *int     `json:"minItems,omitempty"`    // For array types
-	MaxItems    *int     `json:"maxItems,omitempty"`    // For array types
-	Pattern     string   `json:"pattern,omitempty"`     // Regex pattern for strings
-	Items       *Items   `json:"items,omitempty"`       // For array types
-	Ref         string   `json:"$ref,omitempty"`        // JSON Schema reference
-	OneOf       []any    `json:"oneOf,omitempty"`       // Union types
-	AnyOf       []any    `json:"anyOf,omitempty"`       // Union types
+	Title       string         `json:"title,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Type        JSONSchemaType `json:"type,omitempty"`
+	Format      string         `json:"format,omitempty"`
+	Enum        []any          `json:"enum,omitempty"`
+	Minimum     *float64       `json:"minimum,omitempty"`
+	Maximum     *float64       `json:"maximum,omitempty"`
+	MinItems    *int           `json:"minItems,omitempty"`
+	MaxItems    *int           `json:"maxItems,omitempty"`
+	Pattern     string         `json:"pattern,omitempty"`
+	Items       *Items         `json:"items,omitempty"`
+	Ref         string         `json:"$ref,omitempty"`
+	OneOf       []any          `json:"oneOf,omitempty"`
+	AnyOf       []any          `json:"anyOf,omitempty"`
 
 	// AdditionalFields holds foreign members.
 	AdditionalFields map[string]any `json:"-"`
@@ -39,7 +114,7 @@ type QueryableField struct {
 
 // Items represents the items schema for array types.
 type Items struct {
-	Type string `json:"type,omitempty"`
+	Type JSONSchemaType `json:"type,omitempty"`
 }
 
 var knownQueryablesFields = map[string]bool{
@@ -78,7 +153,6 @@ func (q *Queryables) UnmarshalJSON(data []byte) error {
 			q.AdditionalFields[key] = decoded
 		}
 	}
-
 	return nil
 }
 
@@ -91,24 +165,23 @@ func (q Queryables) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	if len(q.AdditionalFields) == 0 {
 		return data, nil
 	}
-
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, err
 	}
-
 	for key, val := range q.AdditionalFields {
+		if knownQueryablesFields[key] {
+			continue
+		}
 		encoded, err := json.Marshal(val)
 		if err != nil {
 			return nil, err
 		}
 		obj[key] = encoded
 	}
-
 	return json.Marshal(obj)
 }
 
@@ -136,7 +209,6 @@ func (qf *QueryableField) UnmarshalJSON(data []byte) error {
 			qf.AdditionalFields[key] = decoded
 		}
 	}
-
 	return nil
 }
 
@@ -149,24 +221,23 @@ func (qf QueryableField) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	if len(qf.AdditionalFields) == 0 {
 		return data, nil
 	}
-
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, err
 	}
-
 	for key, val := range qf.AdditionalFields {
+		if knownQueryableFieldFields[key] {
+			continue
+		}
 		encoded, err := json.Marshal(val)
 		if err != nil {
 			return nil, err
 		}
 		obj[key] = encoded
 	}
-
 	return json.Marshal(obj)
 }
 
@@ -180,12 +251,12 @@ func (qf *QueryableField) DisplayName(key string) string {
 
 // TypeDescription returns a human-readable type description.
 func (qf *QueryableField) TypeDescription() string {
-	if qf.Type == "" {
+	t := qf.Type.String()
+	if t == "" {
 		return "any"
 	}
-	desc := qf.Type
 	if qf.Format != "" {
-		desc += " (" + qf.Format + ")"
+		t += " (" + qf.Format + ")"
 	}
-	return desc
+	return t
 }

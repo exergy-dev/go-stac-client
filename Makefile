@@ -1,18 +1,36 @@
 GO ?= go
 
-.PHONY: build test tui clean
+.PHONY: build test test-race test-live vet lint fuzz tui clean
 
 build:
 	$(GO) build ./...
 
-# Run unit tests for all packages.
 test:
-	$(GO) test ./...
+	$(GO) test -short ./...
 
-# Launch the Bubble Tea TUI browser.
+test-race:
+	$(GO) test -short -race ./...
+
+# Live integration tests against public STAC APIs (Earth Search, Planetary Computer).
+# Requires network access; skips upstream 5xx as flakes.
+test-live:
+	$(GO) test -tags=live -timeout=300s -v -run TestLive ./pkg/client/
+
+vet:
+	$(GO) vet ./...
+
+lint:
+	$(GO) vet ./...
+	gofmt -l . | (! grep .)
+
+fuzz:
+	$(GO) test -run=^$$ -fuzz=^FuzzItemUnmarshal$$ -fuzztime=20s ./pkg/stac/
+	$(GO) test -run=^$$ -fuzz=^FuzzCollectionUnmarshal$$ -fuzztime=20s ./pkg/stac/
+	$(GO) test -run=^$$ -fuzz=^FuzzCatalogUnmarshal$$ -fuzztime=20s ./pkg/stac/
+	$(GO) test -run=^$$ -fuzz=^FuzzLinkUnmarshal$$ -fuzztime=20s ./pkg/stac/
+
 tui:
 	$(GO) run ./cmd/tui
 
-# Remove build artifacts produced by Go.
 clean:
 	$(GO) clean

@@ -65,6 +65,9 @@ func (link Link) MarshalJSON() ([]byte, error) {
 	}
 
 	for key, val := range link.AdditionalFields {
+		if knownLinkFields[key] {
+			continue
+		}
 		encoded, err := json.Marshal(val)
 		if err != nil {
 			return nil, err
@@ -73,4 +76,25 @@ func (link Link) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(obj)
+}
+
+// firstLinkByRel returns the first link with the matching rel, or nil.
+func firstLinkByRel(links []*Link, rel string) *Link {
+	for _, l := range links {
+		if l != nil && l.Rel == rel {
+			return l
+		}
+	}
+	return nil
+}
+
+// linksByRel returns all links with the matching rel.
+func linksByRel(links []*Link, rel string) []*Link {
+	var out []*Link
+	for _, l := range links {
+		if l != nil && l.Rel == rel {
+			out = append(out, l)
+		}
+	}
+	return out
 }

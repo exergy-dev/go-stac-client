@@ -1,11 +1,7 @@
 package client
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"iter"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,84 +10,205 @@ import (
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 )
 
+// Version is the library version, surfaced in the default User-Agent.
+const Version = "1.0.0"
+
+// Defaults applied when constructing a Client.
+const (
+	defaultHTTPTimeout    = 30 * time.Second
+	defaultMaxBodyBytes   = 64 * 1024 * 1024 // 64 MiB
+	defaultMaxPages       = 10000
+	defaultMaxErrorBytes  = 16 * 1024
+	defaultMaxResponseLog = 1024
+)
+
+// MaxErrorBodyBytes caps how many bytes of an error response body are
+// captured into HTTPError.Body. Exposed for tests and override.
+var MaxErrorBodyBytes int64 = defaultMaxErrorBytes
+
 // Middleware manipulates an outgoing *http.Request before it is executed.
 // The context is provided for cancellation and to support auth implementations
-// that may need to perform async operations (e.g., token refresh).
-type Middleware func(context.Context, *http.Request) error
+// that may need to perform async operations such as token refresh.
+type Middleware func(*http.Request) error
 
 // NextHandler determines the next-page URL from a list of STAC links.
 // Return nil if there's no next page, or an error if parsing fails.
+//
+// NextHandler is consulted by DefaultNextHandler-aware decoders. The built-in
+// LinkDecoder honors it when set on the Client; pass WithNextHandler to override.
 type NextHandler func([]*stac.Link) (*url.URL, error)
-
-// PageResponse holds the decoded response from a paginated API call.
-type PageResponse[T any] struct {
-	Items   []*T
-	Links   []*stac.Link
-	Cursor  string   // For cursor-based pagination (e.g., ICEYE)
-	NextURL *url.URL // Pre-computed next URL (optional, takes precedence over Links)
-}
-
-// PageDecoder decodes a paginated response body into items and pagination info.
-type PageDecoder[T any] func(r io.Reader) (*PageResponse[T], error)
 
 // ClientOption configures the Client.
 type ClientOption func(*Client)
 
-// Client represents a STAC API client
+// Client represents a STAC API client.
+//
+// A Client is safe for concurrent use after construction. Applying additional
+// ClientOptions to a Client after it has been used by another goroutine is
+// not safe.
 type Client struct {
-	baseURL     *url.URL
-	httpClient  *http.Client
-	nextHandler NextHandler
-	middleware  []Middleware
-	userAgent   string
+	baseURL       *url.URL
+	httpClient    *http.Client
+	timeout       time.Duration
+	nextHandler   NextHandler
+	middleware    []Middleware
+	userAgent     string
+	maxPages      int
+	maxBodyBytes  int64
+	allowedHosts  map[string]struct{} // optional allowlist for paginated next URLs
+	allowAllHosts bool
 }
 
-// -----------------------------------------------------------------------------
-// Client options
-// -----------------------------------------------------------------------------
-
-// WithHTTPClient sets a custom HTTP client.
+// WithHTTPClient sets a custom HTTP client. The supplied client is used as-is;
+// the STAC client never mutates it.
 func WithHTTPClient(client *http.Client) ClientOption {
-	return func(c *Client) { c.httpClient = client }
+	return func(c *Client) {
+		if client != nil {
+			c.httpClient = client
+		}
+	}
 }
 
-// WithTimeout sets the HTTP timeout.
+// WithTimeout sets the per-request HTTP timeout. The timeout is applied via
+// context.WithTimeout on each request and never mutates the underlying
+// http.Client. A zero value disables the per-request timeout.
 func WithTimeout(d time.Duration) ClientOption {
-	return func(c *Client) { c.httpClient.Timeout = d }
+	return func(c *Client) { c.timeout = d }
 }
 
-// WithNextHandler configures a custom NextHandler for pagination.
+// WithNextHandler configures a custom NextHandler used when the built-in
+// LinkDecoder finds no rel="next" link via the default lookup. Most callers
+// will not need this; it exists to support non-standard pagination link rels.
 func WithNextHandler(h NextHandler) ClientOption {
 	return func(c *Client) { c.nextHandler = h }
 }
 
-// WithMiddleware registers one or more request-middleware functions.
+// WithMiddleware registers one or more request-middleware functions. They run
+// in the order registered, before the request is dispatched.
 func WithMiddleware(mw ...Middleware) ClientOption {
 	return func(c *Client) { c.middleware = append(c.middleware, mw...) }
 }
 
-// WithUserAgent sets a custom User-Agent header for all requests.
+// WithUserAgent overrides the default User-Agent.
 func WithUserAgent(ua string) ClientOption {
 	return func(c *Client) { c.userAgent = ua }
 }
 
-// NewClient creates a new STAC client.
+// WithMaxPages caps the number of pages an iterator will fetch. Zero or
+// negative disables the limit (not recommended for untrusted servers).
+func WithMaxPages(n int) ClientOption {
+	return func(c *Client) { c.maxPages = n }
+}
+
+// WithMaxBodyBytes caps the size of any single response body decoded by the
+// client. Bodies larger than this return ErrResponseTooLarge.
+// Zero or negative disables the limit.
+func WithMaxBodyBytes(n int64) ClientOption {
+	return func(c *Client) { c.maxBodyBytes = n }
+}
+
+// WithAllowedHosts restricts the hosts the client will fetch from when
+// following pagination next-links. The base URL host is always allowed.
+//
+// Without this option, the client follows any host the server returns.
+// Use it to mitigate SSRF or credential-leak risks across hosts.
+func WithAllowedHosts(hosts ...string) ClientOption {
+	return func(c *Client) {
+		if c.allowedHosts == nil {
+			c.allowedHosts = map[string]struct{}{}
+		}
+		for _, h := range hosts {
+			c.allowedHosts[strings.ToLower(h)] = struct{}{}
+		}
+	}
+}
+
+// WithBearerToken installs a middleware that sends the given bearer token in
+// the Authorization header on requests to the base URL's origin (scheme+host+port).
+// Requests to other origins (e.g., a CDN-fronted next link) do not receive the token.
+func WithBearerToken(token string) ClientOption {
+	return func(c *Client) {
+		base := originOf(c.baseURL)
+		c.middleware = append(c.middleware, func(req *http.Request) error {
+			if originOf(req.URL) == base {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+			return nil
+		})
+	}
+}
+
+// WithAPIKey installs a middleware that sends the given header on requests to
+// the base URL's origin. Requests to other origins do not receive the header.
+func WithAPIKey(header, value string) ClientOption {
+	return func(c *Client) {
+		if header == "" {
+			return
+		}
+		base := originOf(c.baseURL)
+		c.middleware = append(c.middleware, func(req *http.Request) error {
+			if originOf(req.URL) == base {
+				req.Header.Set(header, value)
+			}
+			return nil
+		})
+	}
+}
+
+// originOf returns scheme://host[:port] in lowercase, with default ports
+// elided so https://example.com and https://example.com:443 compare equal.
+func originOf(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Host)
+	switch {
+	case scheme == "http" && strings.HasSuffix(host, ":80"):
+		host = strings.TrimSuffix(host, ":80")
+	case scheme == "https" && strings.HasSuffix(host, ":443"):
+		host = strings.TrimSuffix(host, ":443")
+	}
+	return scheme + "://" + host
+}
+
+// NewClient creates a new STAC client rooted at baseURL.
+//
+// baseURL must be an absolute http or https URL. A trailing slash is added to
+// its path if missing so that relative paths ("collections", "search", …)
+// resolve under the API root.
 func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
+	if baseURL == "" {
+		return nil, fmt.Errorf("stac: baseURL is required")
+	}
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("stac: invalid baseURL %q: %w", baseURL, err)
 	}
-
-	if u.Path != "" && !strings.HasSuffix(u.Path, "/") {
+	if !u.IsAbs() {
+		return nil, fmt.Errorf("stac: baseURL must be absolute, got %q", baseURL)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("stac: baseURL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	if !strings.HasSuffix(u.Path, "/") {
 		u.Path += "/"
 	}
 	if u.RawPath != "" && !strings.HasSuffix(u.RawPath, "/") {
 		u.RawPath += "/"
 	}
+
 	c := &Client{
-		baseURL:     u,
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
-		nextHandler: DefaultNextHandler,
+		baseURL:      u,
+		httpClient:   &http.Client{},
+		timeout:      defaultHTTPTimeout,
+		nextHandler:  DefaultNextHandler,
+		userAgent:    fmt.Sprintf("go-stac-client/%s (+https://github.com/robert-malhotra/go-stac-client)", Version),
+		maxPages:     defaultMaxPages,
+		maxBodyBytes: defaultMaxBodyBytes,
 	}
 	for _, o := range opts {
 		o(c)
@@ -99,246 +216,53 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	return c, nil
 }
 
+// BaseURL returns a copy of the client's base URL.
+func (c *Client) BaseURL() *url.URL {
+	u := *c.baseURL
+	return &u
+}
+
+// hostAllowed reports whether the given URL host is permitted as a next-page
+// destination. The base URL host is always allowed; matching is by Host
+// (host:port) so that two services on different ports of the same machine
+// are correctly distinguished.
+func (c *Client) hostAllowed(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	if c.allowedHosts == nil {
+		return true
+	}
+	host := strings.ToLower(u.Host)
+	if host == strings.ToLower(c.baseURL.Host) {
+		return true
+	}
+	_, ok := c.allowedHosts[host]
+	return ok
+}
+
 // DefaultNextHandler looks for the first link with rel="next" and returns its
-// Href parsed as a URL. The returned URL may be relative or absolute,
-// as specified in the link's Href.
+// Href parsed as a URL. The returned URL may be relative or absolute.
 func DefaultNextHandler(links []*stac.Link) (*url.URL, error) {
 	nl := findLinkByRel(links, "next")
 	if nl == nil {
-		return nil, nil // No "next" link found
+		return nil, nil
 	}
-
 	if nl.Href == "" {
-		return nil, fmt.Errorf("found 'next' link with empty Href")
+		return nil, fmt.Errorf("stac: 'next' link has empty href")
 	}
-
-	parsedNextURL, err := url.Parse(nl.Href)
+	parsed, err := url.Parse(nl.Href)
 	if err != nil {
-		return nil, fmt.Errorf("invalid 'next' link URL '%s': %w", nl.Href, err)
+		return nil, fmt.Errorf("stac: invalid 'next' link URL %q: %w", nl.Href, err)
 	}
-	return parsedNextURL, nil
+	return parsed, nil
 }
+
 func findLinkByRel(links []*stac.Link, rel string) *stac.Link {
-	for i := range links {
-		if links[i].Rel == rel {
-			return links[i]
+	for _, l := range links {
+		if l != nil && l.Rel == rel {
+			return l
 		}
 	}
 	return nil
-}
-
-// -----------------------------------------------------------------------------
-// Page Decoders - helpers for different API response formats
-// -----------------------------------------------------------------------------
-
-// DefaultItemDecoder creates a decoder for standard STAC item responses.
-// Standard STAC APIs return {"features": [...], "links": [...]}.
-func DefaultItemDecoder() PageDecoder[stac.Item] {
-	return func(r io.Reader) (*PageResponse[stac.Item], error) {
-		var page struct {
-			Features []*stac.Item `json:"features"`
-			Links    []*stac.Link `json:"links"`
-		}
-		if err := json.NewDecoder(r).Decode(&page); err != nil {
-			return nil, err
-		}
-		return &PageResponse[stac.Item]{Items: page.Features, Links: page.Links}, nil
-	}
-}
-
-// DefaultCollectionDecoder creates a decoder for standard STAC collection responses.
-// Standard STAC APIs return {"collections": [...], "links": [...]}.
-func DefaultCollectionDecoder() PageDecoder[stac.Collection] {
-	return func(r io.Reader) (*PageResponse[stac.Collection], error) {
-		var page struct {
-			Collections []*stac.Collection `json:"collections"`
-			Links       []*stac.Link       `json:"links"`
-		}
-		if err := json.NewDecoder(r).Decode(&page); err != nil {
-			return nil, err
-		}
-		return &PageResponse[stac.Collection]{Items: page.Collections, Links: page.Links}, nil
-	}
-}
-
-// CursorItemDecoder creates a decoder for cursor-based pagination APIs like ICEYE.
-// These APIs return {"data": [...], "cursor": "..."} instead of STAC-standard format.
-// The nextURLTemplate should contain "%s" where the cursor value will be substituted.
-// Example: "/catalog/v2/items?cursor=%s"
-func CursorItemDecoder(itemsField, cursorField, nextURLTemplate string) PageDecoder[stac.Item] {
-	return func(r io.Reader) (*PageResponse[stac.Item], error) {
-		var raw map[string]json.RawMessage
-		if err := json.NewDecoder(r).Decode(&raw); err != nil {
-			return nil, err
-		}
-
-		resp := &PageResponse[stac.Item]{}
-
-		// Decode items from the specified field
-		if data, ok := raw[itemsField]; ok {
-			if err := json.Unmarshal(data, &resp.Items); err != nil {
-				return nil, fmt.Errorf("decode %s: %w", itemsField, err)
-			}
-		}
-
-		// Decode cursor from the specified field
-		if c, ok := raw[cursorField]; ok {
-			if err := json.Unmarshal(c, &resp.Cursor); err != nil {
-				return nil, fmt.Errorf("decode %s: %w", cursorField, err)
-			}
-		}
-
-		// Build next URL from cursor if present
-		if resp.Cursor != "" && nextURLTemplate != "" {
-			nextURL, err := url.Parse(fmt.Sprintf(nextURLTemplate, url.QueryEscape(resp.Cursor)))
-			if err != nil {
-				return nil, fmt.Errorf("build next URL: %w", err)
-			}
-			resp.NextURL = nextURL
-		}
-
-		return resp, nil
-	}
-}
-
-// -----------------------------------------------------------------------------
-// iteratePages: generic STAC pagination driver (no type params on methods!)
-// -----------------------------------------------------------------------------
-//
-//   - startPath – relative OR absolute URL for page 1.
-//   - decoder   – turns the HTTP body into `(slice-of-T, links)`.
-//
-// The consumer receives values via an `iter.Seq2[*T,error]` exactly like
-// GetItems / GetCollections already expose.
-
-func iteratePages[T any](
-	ctx context.Context,
-	cli *Client,
-	startPath string,
-	decoder func(io.Reader) ([]*T, []*stac.Link, error),
-) iter.Seq2[*T, error] {
-	// Wrap old-style decoder into new PageDecoder format
-	pageDecoder := func(r io.Reader) (*PageResponse[T], error) {
-		items, links, err := decoder(r)
-		if err != nil {
-			return nil, err
-		}
-		return &PageResponse[T]{Items: items, Links: links}, nil
-	}
-	return iteratePagesWithDecoder(ctx, cli, startPath, pageDecoder)
-}
-
-// iteratePagesWithDecoder is the generic pagination driver that supports both
-// link-based (standard STAC) and cursor-based (e.g., ICEYE) pagination.
-//
-//   - startPath – relative OR absolute URL for page 1.
-//   - decoder   – PageDecoder that parses response and extracts pagination info.
-//
-// The decoder can return either:
-//   - Links for standard STAC pagination (uses client's NextHandler)
-//   - NextURL for pre-computed next page URL (takes precedence over Links)
-//   - Cursor for cursor-based APIs (decoder should build NextURL from cursor)
-func iteratePagesWithDecoder[T any](
-	ctx context.Context,
-	cli *Client,
-	startPath string,
-	decoder PageDecoder[T],
-) iter.Seq2[*T, error] {
-
-	return func(yield func(*T, error) bool) {
-		startURL, err := url.Parse(startPath)
-		if err != nil {
-			yield(nil, fmt.Errorf("invalid start path %q: %w", startPath, err))
-			return
-		}
-
-		current := cli.baseURL.ResolveReference(startURL)
-
-		for {
-			// --------------------------- HTTP round-trip -------------------
-			resp, err := cli.doRequest(ctx, http.MethodGet, current.String(), nil)
-			if err != nil {
-				if !yield(nil, err) {
-					return
-				}
-				return
-			}
-			if resp.StatusCode != http.StatusOK {
-				resp.Body.Close()
-				if !yield(nil, fmt.Errorf("unexpected status %d on %s", resp.StatusCode, current)) {
-					return
-				}
-				return
-			}
-
-			// --------------------------- Decode body ----------------------
-			page, err := decoder(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				if !yield(nil, fmt.Errorf("error decoding response from %s: %w", current, err)) {
-					return
-				}
-				return
-			}
-
-			for _, v := range page.Items {
-				if !yield(v, nil) {
-					return // consumer stopped
-				}
-			}
-
-			// --------------------------- Follow "next" --------------------
-			// Priority: NextURL > Links (via nextHandler)
-			var next *url.URL
-			if page.NextURL != nil {
-				next = page.NextURL
-			} else if len(page.Links) > 0 {
-				next, err = cli.nextHandler(page.Links)
-				if err != nil {
-					if !yield(nil, fmt.Errorf("error determining next page from %s: %w", current, err)) {
-						return
-					}
-					return
-				}
-			}
-
-			if next == nil || next.String() == current.String() {
-				return // done
-			}
-			current = cli.baseURL.ResolveReference(next)
-		}
-	}
-}
-
-// -----------------------------------------------------------------------------
-// doRequest: one place to build a request, run middleware, and execute it.
-// -----------------------------------------------------------------------------
-//
-// Every endpoint (GetItem, GetCollection, GetItems, GetCollections, Search…)
-// should funnel its outbound HTTP calls through this helper so we never repeat
-// the boiler-plate middleware loop.
-func (c *Client) doRequest(ctx context.Context, method, rawURL string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
-	if err != nil {
-		return nil, fmt.Errorf("error creating request for %s: %w", rawURL, err)
-	}
-
-	// Set Content-Type for requests with body
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	// Set User-Agent if configured
-	if c.userAgent != "" {
-		req.Header.Set("User-Agent", c.userAgent)
-	}
-
-	// Apply all registered middleware in order.
-	for _, mw := range c.middleware {
-		if err := mw(ctx, req); err != nil {
-			return nil, fmt.Errorf("error applying middleware for %s: %w", rawURL, err)
-		}
-	}
-
-	return c.httpClient.Do(req)
 }

@@ -2,100 +2,61 @@ package client
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
-	"net/http"
+	"net/url"
 
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 )
 
 // GetCollection fetches a single collection document by ID.
+//
+// Returns a *HTTPError satisfying errors.Is(err, ErrNotFound) when the
+// collection does not exist.
 func (c *Client) GetCollection(ctx context.Context, collectionID string) (*stac.Collection, error) {
 	if collectionID == "" {
-		return nil, fmt.Errorf("collection ID cannot be empty")
+		return nil, fmt.Errorf("stac: collection ID cannot be empty")
 	}
-
-	u := c.baseURL.JoinPath("collections", collectionID)
-
-	resp, err := c.doRequest(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code %d for %s", resp.StatusCode, u)
-	}
-
-	var col stac.Collection
-	err = json.NewDecoder(resp.Body).Decode(&col)
-	return &col, err
+	path := fmt.Sprintf("collections/%s", url.PathEscape(collectionID))
+	return doJSON[stac.Collection](ctx, c, Get(path))
 }
 
-// GetCollections iterates over every collection exposed by the STAC API
-// referenced by the client. It transparently follows pagination using the
-// client's nextHandler. The returned iterator yields either *stac.Collection
-// values or an error. The iteration stops when the consumer returns false or
-// when there are no further pages.
+// GetCollections returns an iterator over all collections exposed by the
+// STAC API.
 func (c *Client) GetCollections(ctx context.Context) iter.Seq2[*stac.Collection, error] {
-	return c.GetCollectionsWithDecoder(ctx, DefaultCollectionDecoder())
+	return Iterate(ctx, c, Get("collections"), CollectionDecoder())
 }
 
-// GetCollectionsWithDecoder fetches collections using a custom page decoder.
-// This is useful for APIs that return non-standard response formats.
-func (c *Client) GetCollectionsWithDecoder(ctx context.Context, decoder PageDecoder[stac.Collection]) iter.Seq2[*stac.Collection, error] {
-	return iteratePagesWithDecoder[stac.Collection](ctx, c, "collections", decoder)
+// GetCollectionsPages returns an iterator over pages of collections.
+func (c *Client) GetCollectionsPages(ctx context.Context) iter.Seq2[*PageResult[stac.Collection], error] {
+	return IteratePages(ctx, c, Get("collections"), CollectionDecoder())
 }
 
 // GetQueryables fetches the queryable properties for a collection.
-// The endpoint is /collections/{collectionId}/queryables as per OGC API - Features Part 3.
+//
+// The endpoint is /collections/{collectionId}/queryables per OGC API Features
+// Part 3. Returns a *HTTPError satisfying errors.Is(err, ErrNotFound) when
+// the collection does not expose queryables.
 func (c *Client) GetQueryables(ctx context.Context, collectionID string) (*stac.Queryables, error) {
 	if collectionID == "" {
-		return nil, fmt.Errorf("collection ID cannot be empty")
+		return nil, fmt.Errorf("stac: collection ID cannot be empty")
 	}
-
-	u := c.baseURL.JoinPath("collections", collectionID, "queryables")
-
-	resp, err := c.doRequest(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("queryables not available for collection %s", collectionID)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code %d for %s", resp.StatusCode, u)
-	}
-
-	var q stac.Queryables
-	err = json.NewDecoder(resp.Body).Decode(&q)
-	return &q, err
+	path := fmt.Sprintf("collections/%s/queryables", url.PathEscape(collectionID))
+	return doJSON[stac.Queryables](ctx, c, Get(path))
 }
 
 // GetGlobalQueryables fetches the global queryable properties for the STAC API.
-// The endpoint is /queryables as per OGC API - Features Part 3.
+//
+// The endpoint is /queryables per OGC API Features Part 3. Returns a
+// *HTTPError satisfying errors.Is(err, ErrNotFound) when the API does not
+// expose this endpoint.
 func (c *Client) GetGlobalQueryables(ctx context.Context) (*stac.Queryables, error) {
-	u := c.baseURL.JoinPath("queryables")
+	return doJSON[stac.Queryables](ctx, c, Get("queryables"))
+}
 
-	resp, err := c.doRequest(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("queryables endpoint not available")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code %d for %s", resp.StatusCode, u)
-	}
-
-	var q stac.Queryables
-	err = json.NewDecoder(resp.Body).Decode(&q)
-	return &q, err
+// isLimitErr is a small helper used by doJSON to detect the limited-body
+// sentinel.
+func isLimitErr(err error, target **limitedReadError) bool {
+	return err != nil && errors.As(err, target)
 }

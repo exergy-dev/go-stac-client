@@ -6,6 +6,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	// Register the s3:// asset downloader so the TUI can fetch assets
+	// from S3-backed STAC catalogs.
+	_ "github.com/robert-malhotra/go-stac-client/pkg/client/s3"
 )
 
 func main() {

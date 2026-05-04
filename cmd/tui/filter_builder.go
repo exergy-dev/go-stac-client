@@ -459,7 +459,7 @@ func (fb *filterBuilder) onPropertyChanged(index int) {
 func (fb *filterBuilder) updateValuePlaceholder(prop *stac.QueryableField) {
 	placeholder := "Enter value"
 
-	switch prop.Type {
+	switch prop.Type.First() {
 	case "number", "integer":
 		placeholder = "Enter number"
 		if prop.Minimum != nil && prop.Maximum != nil {
@@ -654,7 +654,7 @@ func (fb *filterBuilder) buildConditionExpr(cond filterCondition) map[string]any
 
 // parseValue converts string value to appropriate type
 func (fb *filterBuilder) parseValue(value string, prop *stac.QueryableField) any {
-	switch prop.Type {
+	switch prop.Type.First() {
 	case "integer":
 		if i, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return i

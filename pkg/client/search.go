@@ -1,70 +1,115 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"iter"
-	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 )
 
-// -----------------------------------------------------------------------------
-// Domain model & search types (assumed unchanged from original)
-// -----------------------------------------------------------------------------
+// SortDirection is "asc" or "desc".
+type SortDirection string
 
+const (
+	SortAsc  SortDirection = "asc"
+	SortDesc SortDirection = "desc"
+)
+
+// SearchParams contains the parameters for a STAC API /search request.
+//
+// All fields are optional. Filter accepts any value that JSON-marshals into
+// a CQL2 expression — typically the raw JSON output of the
+// github.com/exergy-dev/go-cql2/json encoder, a json.RawMessage, or a
+// stac-aware CQL2 AST type. Use FilterLang to identify the encoding
+// ("cql2-json" or "cql2-text").
 type SearchParams struct {
 	Collections []string       `json:"collections,omitempty"`
-	IDs         []string       `json:"ids,omitempty"`         // Filter by item IDs
+	IDs         []string       `json:"ids,omitempty"`
 	Bbox        []float64      `json:"bbox,omitempty"`
-	Intersects  any            `json:"intersects,omitempty"`  // GeoJSON geometry for spatial filtering
+	Intersects  any            `json:"intersects,omitempty"`
 	Datetime    string         `json:"datetime,omitempty"`
 	Query       map[string]any `json:"query,omitempty"`
 	Limit       int            `json:"limit,omitempty"`
 	SortBy      []SortField    `json:"sortby,omitempty"`
 	Fields      *FieldsFilter  `json:"fields,omitempty"`
-	Filter      any            `json:"filter,omitempty"`      // CQL2 filter expression
-	FilterLang  string         `json:"filter-lang,omitempty"` // "cql2-json" or "cql2-text"
-	FilterCRS   string         `json:"filter-crs,omitempty"`  // CRS for filter geometry
+	Filter      any            `json:"filter,omitempty"`
+	FilterLang  string         `json:"filter-lang,omitempty"`
+	FilterCRS   string         `json:"filter-crs,omitempty"`
 }
 
+// SortField specifies a field and direction for sorting.
 type SortField struct {
-	Field     string `json:"field"`
-	Direction string `json:"direction"` // "asc" or "desc"
+	Field     string        `json:"field"`
+	Direction SortDirection `json:"direction"`
 }
 
+// FieldsFilter specifies which fields to include or exclude from items.
 type FieldsFilter struct {
 	Include []string `json:"include,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
 }
 
-type Error struct {
-	Code        int    `json:"code"` // HTTP status code
-	Description string `json:"description"`
-	Type        string `json:"type,omitempty"` // Specific error type if provided by API
+// Search performs a POST-based STAC search and returns an iterator over
+// matching items. Pagination follows next-links honoring method/body
+// foreign members on the link.
+func (c *Client) Search(ctx context.Context, params SearchParams) iter.Seq2[*stac.Item, error] {
+	return Iterate(ctx, c, Post("search", params), ItemDecoder())
+}
+
+// SearchPages performs a POST-based STAC search and returns an iterator over
+// raw pages, exposing numberMatched/numberReturned and the page's items.
+func (c *Client) SearchPages(ctx context.Context, params SearchParams) iter.Seq2[*PageResult[stac.Item], error] {
+	return IteratePages(ctx, c, Post("search", params), ItemDecoder())
 }
 
 // SearchSimple performs a GET-based STAC search using URL query parameters.
+//
+// SearchSimple cannot represent the Intersects parameter (use Search instead);
+// passing it returns ErrUnsupportedForGET. The Filter parameter is supported
+// only for FilterLang "cql2-text" (the default for GET); cql2-json filters
+// require Search.
 func (c *Client) SearchSimple(ctx context.Context, params SearchParams) iter.Seq2[*stac.Item, error] {
-	// Build query parameters
+	path, err := buildSearchPath(params)
+	if err != nil {
+		return errorIter[stac.Item](err)
+	}
+	return Iterate(ctx, c, Get(path), ItemDecoder())
+}
+
+// buildSearchPath builds a search path with query parameters from SearchParams.
+func buildSearchPath(params SearchParams) (string, error) {
+	if params.Intersects != nil {
+		return "", fmt.Errorf("%w: intersects", ErrUnsupportedForGET)
+	}
+
 	q := url.Values{}
-	for _, coll := range params.Collections {
-		q.Add("collections", coll)
+
+	if len(params.Collections) > 0 {
+		coll := make([]string, 0, len(params.Collections))
+		for _, c := range params.Collections {
+			if c == "" {
+				return "", errors.New("stac: empty collection ID in SearchParams.Collections")
+			}
+			coll = append(coll, c)
+		}
+		q.Set("collections", strings.Join(coll, ","))
 	}
 	if len(params.IDs) > 0 {
 		q.Set("ids", strings.Join(params.IDs, ","))
 	}
-
-	var marshalErr error
-	if len(params.Bbox) >= 4 && len(params.Bbox)%2 == 0 {
+	if len(params.Bbox) > 0 {
+		if !(len(params.Bbox) == 4 || len(params.Bbox) == 6) {
+			return "", fmt.Errorf("stac: bbox must have 4 or 6 elements, got %d", len(params.Bbox))
+		}
 		coords := make([]string, len(params.Bbox))
 		for i, v := range params.Bbox {
-			coords[i] = fmt.Sprintf("%g", v)
+			coords[i] = strconv.FormatFloat(v, 'f', -1, 64)
 		}
 		q.Set("bbox", strings.Join(coords, ","))
 	}
@@ -72,140 +117,63 @@ func (c *Client) SearchSimple(ctx context.Context, params SearchParams) iter.Seq
 		q.Set("datetime", params.Datetime)
 	}
 	if params.Limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", params.Limit))
+		q.Set("limit", strconv.Itoa(params.Limit))
 	}
 	if len(params.SortBy) > 0 {
 		var parts []string
 		for _, s := range params.SortBy {
-			dir := strings.ToLower(s.Direction)
-			if dir != "asc" && dir != "desc" {
-				dir = "desc"
+			if s.Field == "" {
+				return "", errors.New("stac: sortby field is empty")
 			}
-			parts = append(parts, fmt.Sprintf("%s:%s", s.Field, dir))
+			sign := "+"
+			switch strings.ToLower(string(s.Direction)) {
+			case "", "asc":
+				sign = "+"
+			case "desc":
+				sign = "-"
+			default:
+				return "", fmt.Errorf("stac: invalid sort direction %q (expected asc or desc)", s.Direction)
+			}
+			parts = append(parts, sign+s.Field)
 		}
 		q.Set("sortby", strings.Join(parts, ","))
 	}
 	if params.Query != nil {
-		if queryJSON, err := json.Marshal(params.Query); err == nil {
-			q.Set("query", string(queryJSON))
-		} else if marshalErr == nil {
-			marshalErr = fmt.Errorf("error encoding query parameters: %w", err)
+		queryJSON, err := json.Marshal(params.Query)
+		if err != nil {
+			return "", fmt.Errorf("stac: encode query: %w", err)
 		}
+		q.Set("query", string(queryJSON))
 	}
 	if params.Fields != nil {
-		if fieldsJSON, err := json.Marshal(params.Fields); err == nil {
-			q.Set("fields", string(fieldsJSON))
-		} else if marshalErr == nil {
-			marshalErr = fmt.Errorf("error encoding fields parameters: %w", err)
+		fieldsJSON, err := json.Marshal(params.Fields)
+		if err != nil {
+			return "", fmt.Errorf("stac: encode fields: %w", err)
 		}
+		q.Set("fields", string(fieldsJSON))
 	}
-	if marshalErr != nil {
-		return func(y func(*stac.Item, error) bool) {
-			y(nil, marshalErr)
+	if params.Filter != nil {
+		lang := params.FilterLang
+		if lang == "" {
+			lang = "cql2-text"
 		}
-	}
-
-	startURL := &url.URL{Path: "search", RawQuery: q.Encode()}
-
-	return iteratePages[stac.Item](ctx, c, startURL.String(),
-		func(r io.Reader) ([]*stac.Item, []*stac.Link, error) {
-			var page struct {
-				Features []*stac.Item `json:"features"`
-				Links    []*stac.Link `json:"links"`
-			}
-			err := json.NewDecoder(r).Decode(&page)
-			return page.Features, page.Links, err
-		})
-}
-
-// SearchCQL2 performs a POST-based STAC search using the provided SearchParams as JSON payload.
-func (c *Client) SearchCQL2(ctx context.Context, params SearchParams) iter.Seq2[*stac.Item, error] {
-	return c.SearchWithDecoder(ctx, params, DefaultItemDecoder())
-}
-
-// SearchWithDecoder performs a POST-based search with a custom page decoder.
-// This is useful for APIs that return non-standard response formats (e.g., ICEYE's cursor-based pagination).
-//
-// Example for ICEYE:
-//
-//	decoder := client.CursorItemDecoder("data", "cursor", "/catalog/v2/items?cursor=%s")
-//	for item, err := range cli.SearchWithDecoder(ctx, params, decoder) {
-//	    // ...
-//	}
-func (c *Client) SearchWithDecoder(ctx context.Context, params SearchParams, decoder PageDecoder[stac.Item]) iter.Seq2[*stac.Item, error] {
-	// Marshal the search parameters into JSON
-	bodyBytes, err := json.Marshal(params)
-	if err != nil {
-		// Return an iterator that immediately yields the error
-		return func(yield func(*stac.Item, error) bool) {
-			yield(nil, fmt.Errorf("error marshalling search parameters: %w", err))
+		if lang != "cql2-text" {
+			return "", fmt.Errorf("%w: filter with filter-lang=%q (only cql2-text is encodable on GET)",
+				ErrUnsupportedForGET, lang)
+		}
+		filterStr, ok := params.Filter.(string)
+		if !ok {
+			return "", fmt.Errorf("stac: GET filter must be a CQL2-text string, got %T", params.Filter)
+		}
+		q.Set("filter", filterStr)
+		q.Set("filter-lang", "cql2-text")
+		if params.FilterCRS != "" {
+			q.Set("filter-crs", params.FilterCRS)
 		}
 	}
 
-	return func(yield func(*stac.Item, error) bool) {
-		current := c.baseURL.ResolveReference(&url.URL{Path: "search"})
-		usePOST := true
-
-		for {
-			var (
-				method = http.MethodGet
-				body   io.Reader
-			)
-			if usePOST {
-				method = http.MethodPost
-				body = bytes.NewReader(bodyBytes)
-			}
-
-			resp, err := c.doRequest(ctx, method, current.String(), body)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if resp.StatusCode != http.StatusOK {
-				defer resp.Body.Close()
-				var apiErr Error
-				if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
-					yield(nil, fmt.Errorf("unexpected status %d on %s", resp.StatusCode, current))
-					return
-				}
-				if apiErr.Code == 0 {
-					apiErr.Code = resp.StatusCode
-				}
-				yield(nil, fmt.Errorf("search error: %s (code %d, type %s)", apiErr.Description, apiErr.Code, apiErr.Type))
-				return
-			}
-
-			page, err := decoder(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				yield(nil, fmt.Errorf("error decoding response from %s: %w", current, err))
-				return
-			}
-
-			for _, it := range page.Items {
-				if !yield(it, nil) {
-					return
-				}
-			}
-
-			// Determine next page URL
-			// Priority: NextURL > Links (via nextHandler)
-			var nextURL *url.URL
-			if page.NextURL != nil {
-				nextURL = page.NextURL
-			} else if len(page.Links) > 0 {
-				nextURL, err = c.nextHandler(page.Links)
-				if err != nil {
-					yield(nil, fmt.Errorf("error determining next page from %s: %w", current, err))
-					return
-				}
-			}
-
-			if nextURL == nil {
-				return
-			}
-			current = c.baseURL.ResolveReference(nextURL)
-			usePOST = false
-		}
+	if len(q) > 0 {
+		return "search?" + q.Encode(), nil
 	}
+	return "search", nil
 }

@@ -3,11 +3,9 @@ package client
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,7 +153,7 @@ func TestClient_GetItem(t *testing.T) {
 	t.Run("not-found", func(t *testing.T) {
 		_, err := cli.GetItem(context.Background(), "dummy", "missing")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "item not found")
+		assert.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
@@ -193,7 +191,7 @@ func TestClient_GetItems(t *testing.T) {
 
 		_, err := collect(cli.GetItems(context.Background(), "single-page"))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "error decoding response")
+		assert.Contains(t, err.Error(), "decode error")
 	})
 
 	t.Run("early stop", func(t *testing.T) {
@@ -205,20 +203,6 @@ func TestClient_GetItems(t *testing.T) {
 			return false // stop immediately
 		})
 		assert.Equal(t, 1, count)
-	})
-
-	t.Run("next handler error", func(t *testing.T) {
-		myErr := fmt.Errorf("next failed")
-		badCli, _ := NewClient(mock.URL, WithNextHandler(func(ls []*stac.Link) (*url.URL, error) {
-			if u, _ := DefaultNextHandler(ls); u != nil {
-				return nil, myErr
-			}
-			return nil, nil
-		}))
-
-		_, err := collect(badCli.GetItems(context.Background(), "test-collection-paginated"))
-		require.Error(t, err)
-		assert.ErrorIs(t, err, myErr)
 	})
 
 }

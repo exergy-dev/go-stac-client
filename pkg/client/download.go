@@ -5,17 +5,42 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
-	"strings"
-
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"sync"
 )
 
 // ProgressFunc reports cumulative bytes downloaded and the expected total.
+// total is -1 when the upstream Content-Length is unknown.
 type ProgressFunc func(downloaded, total int64)
+
+// SchemeDownloader downloads a resource identified by a parsed URL with a
+// resolved scheme other than http/https. Register implementations via
+// RegisterDownloader so that DownloadAsset can dispatch to them — typical
+// uses are s3:// and gs://.
+type SchemeDownloader func(ctx context.Context, u *url.URL, dest io.Writer, progress ProgressFunc) error
+
+var (
+	downloaderMu  sync.RWMutex
+	downloaderReg = map[string]SchemeDownloader{}
+)
+
+// RegisterDownloader registers handler for the given URL scheme (lower-cased).
+// Re-registering replaces any previous handler.
+func RegisterDownloader(scheme string, handler SchemeDownloader) {
+	if scheme == "" || handler == nil {
+		return
+	}
+	downloaderMu.Lock()
+	defer downloaderMu.Unlock()
+	downloaderReg[scheme] = handler
+}
+
+func lookupDownloader(scheme string) SchemeDownloader {
+	downloaderMu.RLock()
+	defer downloaderMu.RUnlock()
+	return downloaderReg[scheme]
+}
 
 // DownloadAsset retrieves the asset at assetURL and writes it to destPath.
 func (c *Client) DownloadAsset(ctx context.Context, assetURL, destPath string) error {
@@ -23,130 +48,93 @@ func (c *Client) DownloadAsset(ctx context.Context, assetURL, destPath string) e
 }
 
 // DownloadAssetWithProgress downloads an asset while reporting progress.
+//
+// The asset URL may be relative (resolved against the client's base URL) or
+// absolute. http and https schemes go through the client's HTTP transport and
+// middleware chain; other schemes are dispatched to a downloader registered
+// via RegisterDownloader. If no downloader is registered, an error is returned.
 func (c *Client) DownloadAssetWithProgress(
 	ctx context.Context,
 	assetURL string,
 	destPath string,
 	progress ProgressFunc,
-) error {
+) (retErr error) {
 	if c == nil {
-		return fmt.Errorf("client is nil")
+		return fmt.Errorf("stac: client is nil")
 	}
 
 	u, err := url.Parse(assetURL)
 	if err != nil {
-		return fmt.Errorf("failed to parse asset URL: %w", err)
+		return fmt.Errorf("stac: parse asset URL: %w", err)
 	}
-
 	if u.Scheme == "" {
 		u = c.baseURL.ResolveReference(u)
 	}
 
-	switch u.Scheme {
-	case "http", "https":
-		return c.downloadHTTP(ctx, u.String(), destPath, progress)
-	case "s3":
-		return downloadS3(ctx, u, destPath, progress)
-	default:
-		return fmt.Errorf("unsupported URL scheme: %s", u.Scheme)
-	}
-}
-
-func (c *Client) downloadHTTP(ctx context.Context, assetURL string, destPath string, progress ProgressFunc) (err error) {
-	resp, err := c.doRequest(ctx, http.MethodGet, assetURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to download asset: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download asset: unexpected status code %d", resp.StatusCode)
-	}
-
 	out, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
+		return fmt.Errorf("stac: create destination file: %w", err)
 	}
 	defer func() {
-		out.Close()
-		if err != nil {
+		cerr := out.Close()
+		if retErr == nil {
+			retErr = cerr
+		}
+		if retErr != nil {
 			_ = os.Remove(destPath)
 		}
 	}()
+
+	switch u.Scheme {
+	case "http", "https":
+		return c.downloadHTTP(ctx, u.String(), out, progress)
+	default:
+		dl := lookupDownloader(u.Scheme)
+		if dl == nil {
+			return fmt.Errorf("stac: no downloader registered for scheme %q (import a downloader package, e.g. pkg/client/s3, to enable it)", u.Scheme)
+		}
+		return dl(ctx, u, out, progress)
+	}
+}
+
+func (c *Client) downloadHTTP(ctx context.Context, assetURL string, dst io.Writer, progress ProgressFunc) error {
+	resp, err := c.Do(ctx, &Request{URL: assetURL})
+	if err != nil {
+		return fmt.Errorf("stac: download asset: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return err
+	}
 
 	total := resp.ContentLength
 	if progress != nil {
 		progress(0, total)
 	}
-
-	_, err = copyWithProgress(ctx, out, resp.Body, total, progress)
+	_, err = copyWithProgress(ctx, dst, resp.Body, total, progress)
 	if err != nil {
-		return fmt.Errorf("failed to write asset to file: %w", err)
+		return fmt.Errorf("stac: write asset: %w", err)
 	}
-
 	return nil
 }
 
-func downloadS3(ctx context.Context, u *url.URL, destPath string, progress ProgressFunc) (err error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	s3Client := s3.NewFromConfig(cfg)
-
-	bucket := u.Host
-	key := strings.TrimPrefix(u.Path, "/")
-
-	result, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to download from S3: %w", err)
-	}
-	defer result.Body.Close()
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer func() {
-		out.Close()
-		if err != nil {
-			_ = os.Remove(destPath)
-		}
-	}()
-
-	var total int64
-	if result.ContentLength != nil {
-		total = *result.ContentLength
-	}
-
-	if progress != nil {
-		progress(0, total)
-	}
-
-	_, err = copyWithProgress(ctx, out, result.Body, total, progress)
-	if err != nil {
-		return fmt.Errorf("failed to write asset to file: %w", err)
-	}
-
-	return nil
+// CopyWithProgress is exported so registered SchemeDownloaders can reuse the
+// same context-aware progress-reporting copy loop.
+func CopyWithProgress(ctx context.Context, dst io.Writer, src io.Reader, total int64, progress ProgressFunc) (int64, error) {
+	return copyWithProgress(ctx, dst, src, total, progress)
 }
 
 func copyWithProgress(ctx context.Context, dst io.Writer, src io.Reader, total int64, progress ProgressFunc) (int64, error) {
-	const defaultBufferSize = 32 * 1024
-	buf := make([]byte, defaultBufferSize)
+	const bufSize = 32 * 1024
+	buf := make([]byte, bufSize)
 	var written int64
-
 	for {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
 				return written, err
 			}
 		}
-
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			w, writeErr := dst.Write(buf[:n])
@@ -161,7 +149,6 @@ func copyWithProgress(ctx context.Context, dst io.Writer, src io.Reader, total i
 				progress(written, total)
 			}
 		}
-
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				return written, nil

@@ -7,9 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 	"github.com/rivo/tview"
 	"github.com/robert-malhotra/go-stac-client/cmd/tui/formatting"
+	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 )
 
 type downloadSession struct {

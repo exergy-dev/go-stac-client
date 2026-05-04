@@ -10,7 +10,8 @@ type Asset struct {
 	Description string   `json:"description,omitempty"`
 	Roles       []string `json:"roles,omitempty"`
 
-	// AdditionalFields holds foreign members from extensions (e.g., "eo:bands", "created").
+	// AdditionalFields holds foreign members from extensions
+	// (e.g. "eo:bands", "proj:epsg", "created").
 	AdditionalFields map[string]any `json:"-"`
 }
 
@@ -67,6 +68,9 @@ func (asset Asset) MarshalJSON() ([]byte, error) {
 	}
 
 	for key, val := range asset.AdditionalFields {
+		if knownAssetFields[key] {
+			continue
+		}
 		encoded, err := json.Marshal(val)
 		if err != nil {
 			return nil, err

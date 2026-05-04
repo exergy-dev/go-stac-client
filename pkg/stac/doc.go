@@ -1,19 +1,18 @@
-// Package stac provides types for working with SpatioTemporal Asset Catalog (STAC) data.
+// Package stac provides Go types for the SpatioTemporal Asset Catalog (STAC)
+// 1.0.0 specification.
 //
-// This package implements STAC Item, Collection, Link, and Asset types with support
-// for "foreign members" - additional JSON fields not defined in the STAC specification.
-// Foreign members are preserved during JSON unmarshaling in the AdditionalFields map.
+// The Item, Collection, Catalog, Asset, Link, and Queryables types all
+// preserve "foreign members" — JSON fields not defined in the core STAC
+// specification — through round-trip marshaling, so STAC extension fields
+// (e.g. eo:bands, proj:epsg) and custom server fields are not lost.
 //
-// Example usage:
+// Geometry on an Item is exposed as json.RawMessage so that 3D coordinates
+// and arbitrary GeoJSON object shapes are preserved verbatim. Decode it into
+// any GeoJSON-compatible type when needed:
 //
-//	var item stac.Item
-//	json.Unmarshal(data, &item)
+//	var geom map[string]any
+//	if err := json.Unmarshal(item.Geometry, &geom); err != nil { ... }
 //
-//	// Access standard fields
-//	fmt.Println(item.ID)
-//
-//	// Access foreign members
-//	if val, ok := item.AdditionalFields["custom_field"]; ok {
-//	    fmt.Println(val)
-//	}
+// The Conformance* constants list well-known STAC API and OGC API conformance
+// class URIs.
 package stac

@@ -2,13 +2,11 @@ package client
 
 import (
 	"context"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	"iter"
 
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 	"github.com/stretchr/testify/assert"
@@ -97,13 +95,19 @@ func TestClient_GetCollection(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		_, err := cli.GetCollection(context.Background(), "missing")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unexpected status code 404")
+		assert.ErrorIs(t, err, ErrNotFound)
+		var herr *HTTPError
+		require.ErrorAs(t, err, &herr)
+		assert.Equal(t, 404, herr.Status)
 	})
 
 	t.Run("server error", func(t *testing.T) {
 		_, err := cli.GetCollection(context.Background(), "error-collection")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unexpected status code 500")
+		assert.ErrorIs(t, err, ErrServer)
+		var herr *HTTPError
+		require.ErrorAs(t, err, &herr)
+		assert.Equal(t, 500, herr.Status)
 	})
 
 }
@@ -136,54 +140,4 @@ func TestClient_GetCollections(t *testing.T) {
 
 }
 
-func TestLive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live network test in -short mode")
-	}
-
-	candidates := []string{
-		"https://planetarycomputer.microsoft.com/api/stac/v1",
-		"https://earth-search.aws.element84.com/v1",
-		"https://cmr.earthdata.nasa.gov/stac/ASF",
-	}
-
-	for _, base := range candidates {
-		cli, err := NewClient(base)
-		if err != nil {
-			t.Logf("live test: skipping candidate %s (client init failed: %v)", base, err)
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		seq := cli.GetCollections(ctx)
-		var (
-			count   int
-			iterErr error
-		)
-
-		seq(func(col *stac.Collection, err error) bool {
-			if err != nil {
-				iterErr = err
-				return false
-			}
-			count++
-			t.Logf("%s collection[%d]=%s", base, count, col.ID)
-			return count < 5
-		})
-		cancel()
-
-		if iterErr != nil {
-			t.Logf("live test: candidate %s returned error: %v", base, iterErr)
-			continue
-		}
-		if count == 0 {
-			t.Logf("live test: candidate %s returned zero collections", base)
-			continue
-		}
-
-		t.Logf("live test succeeded against %s (count=%d)", base, count)
-		return
-	}
-
-	t.Skip("skipping live test: no candidate STAC API responded successfully")
-}
+// Comprehensive live tests live in live_test.go behind the `live` build tag.

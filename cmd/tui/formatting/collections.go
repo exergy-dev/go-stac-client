@@ -62,8 +62,8 @@ func FormatCollectionDetails(col *stac.Collection) string {
 			if len(provider.Roles) > 0 {
 				builder.WriteString(fmt.Sprintf("    Roles: %s\n", strings.Join(provider.Roles, ", ")))
 			}
-			if provider.Url != "" {
-				builder.WriteString(fmt.Sprintf("    URL: %s\n", provider.Url))
+			if provider.URL != "" {
+				builder.WriteString(fmt.Sprintf("    URL: %s\n", provider.URL))
 			}
 		}
 	}
@@ -181,13 +181,17 @@ func FormatCollectionDetails(col *stac.Collection) string {
 	return strings.TrimRight(builder.String(), "\n")
 }
 
-func formatTemporalInterval(interval []any) string {
+func formatTemporalInterval(interval []*string) string {
 	if len(interval) == 0 {
 		return "[]"
 	}
-	jsonBytes, err := json.Marshal(interval)
-	if err != nil {
-		return fmt.Sprintf("%v", interval)
+	parts := make([]string, len(interval))
+	for i, p := range interval {
+		if p == nil {
+			parts[i] = "null"
+		} else {
+			parts[i] = fmt.Sprintf("%q", *p)
+		}
 	}
-	return string(jsonBytes)
+	return "[" + strings.Join(parts, ", ") + "]"
 }

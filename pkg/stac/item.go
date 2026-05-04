@@ -9,12 +9,19 @@ import (
 const ItemType = "Feature"
 
 // Item represents a STAC Item (GeoJSON Feature) with support for foreign members.
-// The Type field is implicit and always "Feature" per the GeoJSON/STAC specification.
+//
+// The Type field is implicit and always "Feature" per the GeoJSON/STAC
+// specification; the marshaller sets it unconditionally and the unmarshaller
+// validates it when present.
+//
+// Geometry is preserved as raw JSON so that 3D coordinates, foreign members,
+// and arbitrary GeoJSON object shapes round-trip losslessly. Decode it into
+// any GeoJSON-compatible Go type when needed.
 type Item struct {
 	Version    string            `json:"stac_version"`
 	Extensions []string          `json:"stac_extensions,omitempty"`
 	ID         string            `json:"id"`
-	Geometry   any               `json:"geometry"`
+	Geometry   json.RawMessage   `json:"geometry"`
 	Bbox       []float64         `json:"bbox,omitempty"`
 	Properties map[string]any    `json:"properties"`
 	Links      []*Link           `json:"links"`
@@ -22,6 +29,9 @@ type Item struct {
 	Collection string            `json:"collection,omitempty"`
 
 	// AdditionalFields holds foreign members not defined in the STAC spec.
+	// Keys "type", "stac_version", "stac_extensions", "id", "geometry", "bbox",
+	// "properties", "links", "assets", and "collection" are ignored on
+	// marshal — the canonical struct fields take precedence.
 	AdditionalFields map[string]any `json:"-"`
 }
 
@@ -45,7 +55,6 @@ func (item *Item) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	// Validate type field if present
 	if typeVal, ok := raw["type"]; ok {
 		var t string
 		if err := json.Unmarshal(typeVal, &t); err == nil && t != "" && t != ItemType {
@@ -68,7 +77,9 @@ func (item *Item) UnmarshalJSON(data []byte) error {
 }
 
 // MarshalJSON implements custom marshaling to include foreign members.
-// The type field is always set to "Feature" per the GeoJSON/STAC specification.
+//
+// The canonical "type" field is always written last so that
+// AdditionalFields cannot override it.
 func (item Item) MarshalJSON() ([]byte, error) {
 	type itemAlias Item
 	aux := itemAlias(item)
@@ -83,12 +94,10 @@ func (item Item) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 
-	// Always include type field
-	typeJSON, _ := json.Marshal(ItemType)
-	obj["type"] = typeJSON
-
-	// Add foreign members
 	for key, val := range item.AdditionalFields {
+		if knownItemFields[key] {
+			continue
+		}
 		encoded, err := json.Marshal(val)
 		if err != nil {
 			return nil, err
@@ -96,26 +105,18 @@ func (item Item) MarshalJSON() ([]byte, error) {
 		obj[key] = encoded
 	}
 
+	typeJSON, _ := json.Marshal(ItemType)
+	obj["type"] = typeJSON
+
 	return json.Marshal(obj)
 }
 
 // GetLink returns the first link with the specified rel type, or nil if not found.
 func (item *Item) GetLink(rel string) *Link {
-	for _, link := range item.Links {
-		if link.Rel == rel {
-			return link
-		}
-	}
-	return nil
+	return firstLinkByRel(item.Links, rel)
 }
 
 // GetLinks returns all links with the specified rel type.
 func (item *Item) GetLinks(rel string) []*Link {
-	var result []*Link
-	for _, link := range item.Links {
-		if link.Rel == rel {
-			result = append(result, link)
-		}
-	}
-	return result
+	return linksByRel(item.Links, rel)
 }
