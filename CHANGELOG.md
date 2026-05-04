@@ -94,6 +94,15 @@ First stable release. STAC API 1.0.0 client targeting Go 1.23+.
   parser as the rest of the geospatial stack and gets correct envelopes,
   ring/hole accounting, and GeometryCollection support for free.
 
+### CQL2 in the TUI filter builder
+
+- TUI's `cmd/tui/filter_builder.go` no longer constructs CQL2-JSON by
+  hand-rolling `map[string]any` literals. Each UI condition is mapped to
+  a [github.com/exergy-dev/go-cql2](https://github.com/exergy-dev/go-cql2)
+  builder call (`cql2.Eq`, `cql2.Lt`, `cql2.Like`, `cql2.IsNull`, …) and
+  the combined expression is encoded through `cql2/json.Encode`. All CQL2
+  generation in the project now goes through go-cql2.
+
 ### Live integration
 
 - `pkg/client/live_test.go` (build tag `live`) covers Element84 Earth

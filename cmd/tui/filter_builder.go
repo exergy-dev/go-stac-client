@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	cql2 "github.com/exergy-dev/go-cql2"
+	cql2json "github.com/exergy-dev/go-cql2/json"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/robert-malhotra/go-stac-client/cmd/tui/formatting"
@@ -18,10 +20,11 @@ import (
 
 const pageFilterBuilder = "filterBuilder"
 
-// CQL2 comparison operators
+// CQL2 comparison operator labels exposed by the UI. The mapping to
+// go-cql2's typed builder lives in buildConditionExpr.
 var cql2ComparisonOps = []string{"=", "<>", "<", "<=", ">", ">=", "like", "is null"}
 
-// CQL2 logical operators
+// CQL2 logical operator labels (see logicalCombine for the go-cql2 mapping).
 var cql2LogicalOps = []string{"and", "or"}
 
 // filterCondition represents a single filter condition
@@ -577,78 +580,85 @@ func (fb *filterBuilder) updatePreview() {
 	fb.previewText.SetText("[green]" + prettyBuf.String() + "[white]")
 }
 
-// buildCQL2Filter constructs the CQL2-JSON filter
+// buildCQL2Filter constructs the CQL2-JSON filter as a string by composing
+// go-cql2 builder expressions and encoding through the official
+// github.com/exergy-dev/go-cql2/json encoder.
 func (fb *filterBuilder) buildCQL2Filter() string {
 	if len(fb.conditions) == 0 {
 		return ""
 	}
-
-	// Build individual condition expressions
-	var exprs []map[string]any
+	exprs := make([]cql2.Expr, 0, len(fb.conditions))
 	for _, cond := range fb.conditions {
-		expr := fb.buildConditionExpr(cond)
-		if expr != nil {
-			exprs = append(exprs, expr)
+		expr, ok := fb.buildConditionExpr(cond)
+		if !ok {
+			continue
 		}
+		exprs = append(exprs, expr)
 	}
-
 	if len(exprs) == 0 {
 		return ""
 	}
-
-	var filter map[string]any
-	if len(exprs) == 1 {
-		filter = exprs[0]
-	} else {
-		// Combine with logical operator
-		filter = map[string]any{
-			"op":   fb.logicalOp,
-			"args": exprs,
-		}
+	combined, err := logicalCombine(fb.logicalOp, exprs)
+	if err != nil {
+		return ""
 	}
-
-	data, err := json.Marshal(filter)
+	data, err := cql2json.Encode(combined.Node())
 	if err != nil {
 		return ""
 	}
 	return string(data)
 }
 
-// buildConditionExpr builds a single CQL2 condition expression
-func (fb *filterBuilder) buildConditionExpr(cond filterCondition) map[string]any {
-	propertyRef := map[string]any{"property": cond.property}
-
-	// Handle "is null" specially
+// buildConditionExpr maps one UI filterCondition to a go-cql2 builder
+// expression. Returns false if the condition cannot be expressed (e.g.,
+// unknown operator).
+func (fb *filterBuilder) buildConditionExpr(cond filterCondition) (cql2.Expr, bool) {
 	if cond.operator == "is null" {
-		return map[string]any{
-			"op":   "isNull",
-			"args": []any{propertyRef},
-		}
+		return cql2.IsNull(cond.property), true
 	}
 
-	// Parse value based on property type
 	var value any = cond.value
-
 	if fb.queryables != nil && fb.queryables.Properties != nil {
 		if prop, ok := fb.queryables.Properties[cond.property]; ok {
 			value = fb.parseValue(cond.value, prop)
 		}
 	}
 
-	// Map operator to CQL2
-	op := cond.operator
-	switch op {
+	switch cond.operator {
 	case "=":
-		op = "="
+		return cql2.Eq(cond.property, value), true
 	case "<>":
-		op = "<>"
+		return cql2.Neq(cond.property, value), true
+	case "<":
+		return cql2.Lt(cond.property, value), true
+	case "<=":
+		return cql2.Lte(cond.property, value), true
+	case ">":
+		return cql2.Gt(cond.property, value), true
+	case ">=":
+		return cql2.Gte(cond.property, value), true
 	case "like":
-		op = "like"
+		pattern, ok := value.(string)
+		if !ok {
+			pattern = cond.value
+		}
+		return cql2.Like(cond.property, pattern), true
 	}
+	return cql2.Expr{}, false
+}
 
-	return map[string]any{
-		"op":   op,
-		"args": []any{propertyRef, value},
+// logicalCombine wraps a list of expressions in the chosen top-level
+// boolean operator. With a single expression the operator is irrelevant
+// and the expression is returned as-is.
+func logicalCombine(op string, exprs []cql2.Expr) (cql2.Expr, error) {
+	if len(exprs) == 1 {
+		return exprs[0], nil
+	}
+	switch strings.ToLower(op) {
+	case "or":
+		return cql2.Or(exprs...), nil
+	default:
+		return cql2.And(exprs...), nil
 	}
 }
 
