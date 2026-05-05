@@ -48,20 +48,26 @@
 //
 // # CQL2 filters
 //
-// Use the github.com/exergy-dev/go-cql2 library to build filters and pass
-// them in via SearchParams.Filter. Helpers CQL2JSON and CQL2Text encode the
-// AST for you:
+// Build filters with github.com/exergy-dev/go-cql2 and encode them through
+// its cql2/json (or cql2/text) codec. Pass the resulting bytes via
+// SearchParams.Filter as a json.RawMessage so the body embeds the filter
+// verbatim:
 //
-//	import cql2 "github.com/exergy-dev/go-cql2"
+//	import (
+//	    cql2 "github.com/exergy-dev/go-cql2"
+//	    cql2json "github.com/exergy-dev/go-cql2/json"
+//	)
 //
 //	expr := cql2.And(
 //	    cql2.Lt("eo:cloud_cover", 10),
 //	    cql2.SIntersects("geometry", cql2.Geom(myGeometry)),
 //	)
+//	b, err := cql2json.Encode(expr.Node())
+//	if err != nil { return err }
 //	params := client.SearchParams{
 //	    Collections: []string{"sentinel-2-l2a"},
-//	    Filter:      client.MustCQL2JSON(expr),
-//	    FilterLang:  client.FilterLangCQL2JSON,
+//	    Filter:      json.RawMessage(b),
+//	    FilterLang:  "cql2-json",
 //	}
 //
 // # Authentication

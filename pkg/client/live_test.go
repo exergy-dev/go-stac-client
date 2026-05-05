@@ -20,6 +20,7 @@ import (
 	"time"
 
 	cql2 "github.com/exergy-dev/go-cql2"
+	cql2json "github.com/exergy-dev/go-cql2/json"
 	"github.com/robert-malhotra/go-stac-client/pkg/stac"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -317,13 +318,13 @@ func testLiveCQL2(t *testing.T, p liveProvider) {
 		cql2.Lt(p.cloudCoverField, 5),
 		cql2.Eq("collection", p.cqlCollection),
 	)
-	filter, err := CQL2JSON(expr)
+	filter, err := cql2json.Encode(expr.Node())
 	require.NoError(t, err)
 	t.Logf("%s cql2-json filter: %s", p.name, filter)
 
 	params := SearchParams{
-		Filter:     filter,
-		FilterLang: FilterLangCQL2JSON,
+		Filter:     json.RawMessage(filter),
+		FilterLang: "cql2-json",
 		Bbox:       p.bbox,
 		Datetime:   "2024-06-01T00:00:00Z/2024-06-30T23:59:59Z",
 		Limit:      5,

@@ -74,11 +74,15 @@ func main() {
 ## CQL2 filters
 
 Build CQL2 expressions with [`go-cql2`](https://github.com/exergy-dev/go-cql2)
-and inject them into `SearchParams.Filter`:
+and encode them through its `cql2/json` (or `cql2/text`) codec. Pass the
+bytes into `SearchParams.Filter` as a `json.RawMessage`:
 
 ```go
 import (
+    "encoding/json"
+
     cql2 "github.com/exergy-dev/go-cql2"
+    cql2json "github.com/exergy-dev/go-cql2/json"
     stacclient "github.com/robert-malhotra/go-stac-client/pkg/client"
 )
 
@@ -86,13 +90,17 @@ expr := cql2.And(
     cql2.Lt("eo:cloud_cover", 10),
     cql2.Eq("collection", "sentinel-2-l2a"),
 )
+b, err := cql2json.Encode(expr.Node())
+if err != nil { return err }
+
 params := stacclient.SearchParams{
-    Filter:     stacclient.MustCQL2JSON(expr),
-    FilterLang: stacclient.FilterLangCQL2JSON,
+    Filter:     json.RawMessage(b),
+    FilterLang: "cql2-json",
 }
 ```
 
-For CQL2-text on GET `/search`, use `MustCQL2Text` and `FilterLangCQL2Text`.
+For CQL2-text on `GET /search`, encode via `cql2/text.Encode` and set
+`FilterLang: "cql2-text"`.
 
 ## Authentication
 

@@ -164,7 +164,7 @@ func TestSearchSimpleRejectsCQL2JSONFilter(t *testing.T) {
 	c, _ := NewClient("https://example.com")
 	_, err := collect(c.SearchSimple(context.Background(), SearchParams{
 		Filter:     json.RawMessage(`{"op":"=","args":[{"property":"id"},"x"]}`),
-		FilterLang: FilterLangCQL2JSON,
+		FilterLang: "cql2-json",
 	}))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrUnsupportedForGET)
@@ -181,7 +181,7 @@ func TestSearchSimpleEncodesCQL2TextFilter(t *testing.T) {
 	c, _ := NewClient(srv.URL)
 	_, _ = collect(c.SearchSimple(context.Background(), SearchParams{
 		Filter:     "eo:cloud_cover < 10",
-		FilterLang: FilterLangCQL2Text,
+		FilterLang: "cql2-text",
 	}))
 	assert.Equal(t, "eo:cloud_cover < 10", got)
 }

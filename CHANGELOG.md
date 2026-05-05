@@ -103,6 +103,22 @@ First stable release. STAC API 1.0.0 client targeting Go 1.23+.
   the combined expression is encoded through `cql2/json.Encode`. All CQL2
   generation in the project now goes through go-cql2.
 
+### CQL2 wrappers removed
+
+- The thin convenience wrappers `CQL2JSON`, `MustCQL2JSON`, `CQL2Text`,
+  `MustCQL2Text`, and the `FilterLangCQL2JSON` / `FilterLangCQL2Text`
+  constants are removed from `pkg/client`. Users encode CQL2 directly
+  through `go-cql2` and supply the bytes to `SearchParams.Filter`:
+  ```go
+  b, err := cql2json.Encode(expr.Node())
+  params := client.SearchParams{
+      Filter:     json.RawMessage(b),
+      FilterLang: "cql2-json",
+  }
+  ```
+  This is breaking for anyone relying on the wrappers; migration is a
+  two-line change at each call site.
+
 ### Live integration
 
 - `pkg/client/live_test.go` (build tag `live`) covers Element84 Earth
