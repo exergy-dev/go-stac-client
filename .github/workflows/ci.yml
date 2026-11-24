@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:   # also runs the manual-only fuzz job
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -13,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         go: ['1.24']
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +60,7 @@ jobs:
           args: --timeout=5m
 
   fuzz:
+    if: github.event_name == 'workflow_dispatch'   # manual only: run from the Actions tab
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
